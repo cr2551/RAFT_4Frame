@@ -12,7 +12,7 @@ from glob import glob
 import os.path as osp
 
 from utils import frame_utils
-from utils.augmentor import FlowAugmentor, SparseFlowAugmentor
+from utils.augmentor import FlowAugmentor, SparseFlowAugmentor, ThreeFrameFlowAugmentor
 
 
 class FlowDataset(data.Dataset):
@@ -99,6 +99,78 @@ class FlowDataset(data.Dataset):
         return len(self.image_list)
         
 
+class FlowDataset3Frame(data.Dataset):
+    """Base dataset for triplets of consecutive frames with two optical flows."""
+
+    def __init__(self, aug_params=None):
+        self.augmentor = None
+        if aug_params is not None:
+            self.augmentor = ThreeFrameFlowAugmentor(**aug_params)
+
+        self.is_test = False
+        self.init_seed = False
+        self.flow_list = []   # list of [flow01_path, flow12_path]
+        self.image_list = []  # list of [img0_path, img1_path, img2_path]
+        self.extra_info = []
+
+    def _ensure_rgb(self, img):
+        if len(img.shape) == 2:
+            return np.tile(img[..., None], (1, 1, 3))
+        return img[..., :3]
+
+    def __getitem__(self, index):
+        if self.is_test:
+            img0 = np.array(frame_utils.read_gen(self.image_list[index][0])).astype(np.uint8)[..., :3]
+            img1 = np.array(frame_utils.read_gen(self.image_list[index][1])).astype(np.uint8)[..., :3]
+            img2 = np.array(frame_utils.read_gen(self.image_list[index][2])).astype(np.uint8)[..., :3]
+            img0 = torch.from_numpy(img0).permute(2, 0, 1).float()
+            img1 = torch.from_numpy(img1).permute(2, 0, 1).float()
+            img2 = torch.from_numpy(img2).permute(2, 0, 1).float()
+            return img0, img1, img2, self.extra_info[index]
+
+        if not self.init_seed:
+            worker_info = torch.utils.data.get_worker_info()
+            if worker_info is not None:
+                torch.manual_seed(worker_info.id)
+                np.random.seed(worker_info.id)
+                random.seed(worker_info.id)
+                self.init_seed = True
+
+        index = index % len(self.image_list)
+
+        img0 = self._ensure_rgb(np.array(frame_utils.read_gen(self.image_list[index][0])).astype(np.uint8))
+        img1 = self._ensure_rgb(np.array(frame_utils.read_gen(self.image_list[index][1])).astype(np.uint8))
+        img2 = self._ensure_rgb(np.array(frame_utils.read_gen(self.image_list[index][2])).astype(np.uint8))
+
+        flow01 = np.array(frame_utils.read_gen(self.flow_list[index][0])).astype(np.float32)
+        flow12 = np.array(frame_utils.read_gen(self.flow_list[index][1])).astype(np.float32)
+
+        valid01 = ((np.abs(flow01[..., 0]) < 1000) & (np.abs(flow01[..., 1]) < 1000)).astype(np.float32)
+        valid12 = ((np.abs(flow12[..., 0]) < 1000) & (np.abs(flow12[..., 1]) < 1000)).astype(np.float32)
+
+        if self.augmentor is not None:
+            img0, img1, img2, flow01, flow12, valid01, valid12 = self.augmentor(
+                img0, img1, img2, flow01, flow12, valid01, valid12)
+
+        img0 = torch.from_numpy(img0).permute(2, 0, 1).float()
+        img1 = torch.from_numpy(img1).permute(2, 0, 1).float()
+        img2 = torch.from_numpy(img2).permute(2, 0, 1).float()
+        flow01 = torch.from_numpy(flow01).permute(2, 0, 1).float()
+        flow12 = torch.from_numpy(flow12).permute(2, 0, 1).float()
+        valid01 = torch.from_numpy(valid01)
+        valid12 = torch.from_numpy(valid12)
+
+        return img0, img1, img2, flow01, flow12, valid01.float(), valid12.float()
+
+    def __rmul__(self, v):
+        self.flow_list = v * self.flow_list
+        self.image_list = v * self.image_list
+        return self
+
+    def __len__(self):
+        return len(self.image_list)
+
+
 class MpiSintel(FlowDataset):
     def __init__(self, aug_params=None, split='training', root='datasets/Sintel', dstype='clean'):
         super(MpiSintel, self).__init__(aug_params)
@@ -116,6 +188,60 @@ class MpiSintel(FlowDataset):
 
             if split != 'test':
                 self.flow_list += sorted(glob(osp.join(flow_root, scene, '*.flo')))
+
+
+class MpiSintel3Frame(FlowDataset3Frame):
+    """Sintel dataset returning consecutive triplets (img0, img1, img2) and (flow01, flow12)."""
+
+    def __init__(self, aug_params=None, split='training', root='datasets/Sintel', dstype='clean'):
+        super(MpiSintel3Frame, self).__init__(aug_params)
+        flow_root = osp.join(root, split, 'flow')
+        image_root = osp.join(root, split, dstype)
+
+        if split == 'test':
+            self.is_test = True
+
+        for scene in sorted(os.listdir(image_root)):
+            images = sorted(glob(osp.join(image_root, scene, '*.png')))
+            flows = sorted(glob(osp.join(flow_root, scene, '*.flo'))) if split != 'test' else []
+            for i in range(len(images) - 2):
+                self.image_list.append([images[i], images[i + 1], images[i + 2]])
+                self.extra_info.append((scene, i))
+                if split != 'test':
+                    self.flow_list.append([flows[i], flows[i + 1]])
+
+
+class FlyingThings3D3Frame(FlowDataset3Frame):
+    """FlyingThings3D returning consecutive triplets (img0, img1, img2) and (flow01, flow12)."""
+
+    def __init__(self, aug_params=None, root='datasets/FlyingThings3D', dstype='frames_cleanpass'):
+        super(FlyingThings3D3Frame, self).__init__(aug_params)
+
+        for cam in ['left']:
+            for direction in ['into_future', 'into_past']:
+                image_dirs = sorted(glob(osp.join(root, dstype, 'TRAIN/*/*')))
+                image_dirs = sorted([osp.join(f, cam) for f in image_dirs])
+
+                flow_dirs = sorted(glob(osp.join(root, 'optical_flow/TRAIN/*/*')))
+                flow_dirs = sorted([osp.join(f, direction, cam) for f in flow_dirs])
+
+                for idir, fdir in zip(image_dirs, flow_dirs):
+                    images = sorted(glob(osp.join(idir, '*.png')))
+                    flows  = sorted(glob(osp.join(fdir, '*.pfm')))
+                    if len(images) < 3 or len(flows) < 2:
+                        continue
+                    if direction == 'into_future':
+                        # need images[i..i+2] and flows[i..i+1]
+                        n = min(len(images) - 2, len(flows) - 1)
+                        for i in range(n):
+                            self.image_list.append([images[i], images[i+1], images[i+2]])
+                            self.flow_list.append([flows[i], flows[i+1]])
+                    elif direction == 'into_past':
+                        # need images[i..i+2] and flows[i+1..i+2]
+                        n = min(len(images) - 2, len(flows) - 2)
+                        for i in range(n):
+                            self.image_list.append([images[i+2], images[i+1], images[i]])
+                            self.flow_list.append([flows[i+2], flows[i+1]])
 
 
 class FlyingChairs(FlowDataset):
@@ -233,3 +359,26 @@ def fetch_dataloader(args, TRAIN_DS='C+T+K+S+H'):
     print('Training with %d image pairs' % len(train_dataset))
     return train_loader
 
+
+def fetch_dataloader_sintel3frame(args, TRAIN_DS='C+T+K/S'):
+    """Create the Sintel 3-frame data loader (returns triplets + two flows).
+
+    TRAIN_DS='S'      : Sintel clean+final only
+    TRAIN_DS='C+T+K/S': Sintel + FlyingThings3D (mirrors original RAFT schedule)
+    """
+    aug_params = {'crop_size': args.image_size, 'min_scale': -0.2, 'max_scale': 0.6, 'do_flip': True}
+    sintel_clean = MpiSintel3Frame(aug_params, split='training', dstype='clean')
+    sintel_final = MpiSintel3Frame(aug_params, split='training', dstype='final')
+
+    if TRAIN_DS == 'C+T+K/S':
+        things = FlyingThings3D3Frame(aug_params, dstype='frames_cleanpass')
+        train_dataset = 100 * sintel_clean + 100 * sintel_final + things
+    else:
+        train_dataset = 100 * sintel_clean + 100 * sintel_final
+
+    train_loader = data.DataLoader(
+        train_dataset, batch_size=args.batch_size,
+        pin_memory=False, shuffle=True, num_workers=4, drop_last=True)
+
+    print('Training with %d triplets (Sintel 3-frame, TRAIN_DS=%s)' % (len(train_dataset), TRAIN_DS))
+    return train_loader
