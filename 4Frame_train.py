@@ -203,7 +203,7 @@ def train(args):
     if args.stage != 'chairs':
         model.module.freeze_bn()
 
-    train_loader = datasets.fetch_dataloader_sintel3frame(args)
+    train_loader = datasets.fetch_dataloader_4frame(args)
     optimizer, scheduler = fetch_optimizer(args, model)
 
     total_steps = 0
@@ -245,15 +245,15 @@ def train(args):
             flow_predictions12 = model(img1, img2, iters=args.iters)
             flow_predictions13 = model(img1, img3, iters=args.iters)
             # from frame 2 to frame 3
-            flow_prediction23 = model(img2, img3, iters=args.iters)
+            flow_predictions23 = model(img2, img3, iters=args.iters)
 
-            flow_predictions02 = []
-            valid_predictions02 = []
+            # flow_predictions02 = []
+            # valid_predictions02 = []
 
-            for pred01, pred12 in zip(flow_predictions01, flow_predictions12):
-                pred02, pred_valid02 = compose_flow(pred01, pred12, valid01, valid12)
-                flow_predictions02.append(pred02)
-                valid_predictions02.append(pred_valid02)
+            # for pred01, pred12 in zip(flow_predictions01, flow_predictions12):
+            #     pred02, pred_valid02 = compose_flow(pred01, pred12, valid01, valid12)
+            #     flow_predictions02.append(pred02)
+            #     valid_predictions02.append(pred_valid02)
 
             # losses 0
             loss01, metrics01 = sequence_loss(flow_predictions01, flow01, valid01, args.gamma)
