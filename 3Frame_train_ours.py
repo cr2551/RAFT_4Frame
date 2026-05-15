@@ -216,7 +216,7 @@ def train(args):
     if args.stage != 'chairs':
         model.module.freeze_bn()
 
-    train_loader = datasets.fetch_dataloader_sintel3frame(args)
+    train_loader = datasets.fetch_dataloader_4frame(args)
     optimizer, scheduler = fetch_optimizer(args, model)
 
     total_steps = 0
@@ -235,15 +235,22 @@ def train(args):
 
         for data_blob in train_loader:
             optimizer.zero_grad()
-            img0, img1, img2, flow01, flow12, valid01, valid12 = [x.cuda() for x in data_blob]
+            img0, img1, img2, img3, flow01, flow12, flow23, valid01, valid12, valid23 = [x.cuda() for x in data_blob]
 
             # --- compose GT flow02 from the two consecutive flows ---
             flow02, valid02 = compose_flow(flow01, flow12, valid01, valid12)
+             # from frame 0 to frame 3
+            flow03, valid03 = compose_flow(flow02, flow23, valid02, valid23)
+            # from frame 1 to frame 3
+            flow13, valid13 = compose_flow(flow12, flow23, valid12, valid23) 
+
 
             if args.add_noise:
                 stdv = np.random.uniform(0.0, 5.0)
                 img0 = (img0 + stdv * torch.randn_like(img0)).clamp(0.0, 255.0)
+                img1 = (img1 + stdv * torch.randn_like(img1)).clamp(0.0, 255.0)
                 img2 = (img2 + stdv * torch.randn_like(img2)).clamp(0.0, 255.0)
+                img3 = (img3 + stdv * torch.randn_like(img3)).clamp(0.0, 255.0)
 
             # --- affine augmentation on img1 ---
             B, _, H, W  = img0.shape

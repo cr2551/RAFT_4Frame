@@ -1,4 +1,5 @@
 from __future__ import print_function, division
+from email import message
 import sys
 sys.path.append('core')
 
@@ -188,6 +189,13 @@ class Logger:
     def close(self):
         self.writer.close()
 
+def check_gpu_mem(message):
+
+    print("-"*20, message, "-"*20)
+    print(torch.cuda.memory_allocated() / 1e9, "GB allocated")
+    print(torch.cuda.memory_reserved() / 1e9, "GB reserved")
+    print(torch.cuda.memory_summary())
+    print("-"*50)
 
 def train(args):
 
@@ -235,10 +243,12 @@ def train(args):
                 img0 = (img0 + stdv * torch.randn_like(img0)).clamp(0.0, 255.0)
                 img1 = (img1 + stdv * torch.randn_like(img1)).clamp(0.0, 255.0)
                 img2 = (img2 + stdv * torch.randn_like(img2)).clamp(0.0, 255.0)
-                img3 = (img2 + stdv * torch.randn_like(img2)).clamp(0.0, 255.0)
+                img3 = (img3 + stdv * torch.randn_like(img3)).clamp(0.0, 255.0)
 
             # Predictions 
             flow_predictions01 = model(img0, img1, iters=args.iters)
+            # Add after each forward pass to locate the exact failure
+            check_gpu_mem("After forward pass 01")
             flow_predictions02 = model(img0, img2, iters=args.iters)
             flow_predictions03 = model(img0, img3, iters=args.iters)
             # from frame 1 to 2 and 3
@@ -265,7 +275,9 @@ def train(args):
             # losses 2 to 3
             loss23, metrics23 = sequence_loss(flow_predictions23, flow23, valid23, args.gamma)
 
-            scaler.scale(0.5*loss01 + loss02 + loss03 + 0.5*loss12 + loss13 + loss23).backward()
+            loss = 0.5*loss01 + loss02 + loss03 + 0.5*loss12 + loss13 + loss23
+
+            scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
             
@@ -274,7 +286,7 @@ def train(args):
             scaler.update()
 
 
-            loss = 0.5*loss01 + loss02 + loss03 + 0.5*loss12 + loss13 + loss23
+            
 
             metrics = {
                 "loss": loss.item(),
